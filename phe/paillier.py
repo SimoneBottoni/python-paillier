@@ -19,6 +19,7 @@
 
 """Paillier encryption library for partially homomorphic encryption."""
 import random
+import numpy as np
 
 try:
     from collections.abc import Mapping
@@ -31,7 +32,75 @@ from phe.util import invert, powmod, getprimeover, isqrt
 # Paillier cryptosystem is based on integer factorisation.
 # The default is chosen to give a minimum of 128 bits of security.
 # https://www.keylength.com/en/4/
-DEFAULT_KEYSIZE = 3072
+DEFAULT_KEYSIZE = 2048
+
+
+def generate_cPDS_keypair(m=4, n_length=DEFAULT_KEYSIZE):
+    """Return a new :class:`PaillierPublicKey` and :class:`PaillierPrivateKey`.
+
+    Add the private key to *private_keyring* if given.
+
+    Args:
+      private_keyring (PaillierPrivateKeyring): a
+        :class:`PaillierPrivateKeyring` on which to store the private
+        key.
+      n_length: key size in bits.
+
+    Returns:
+      tuple: The generated :class:`PaillierPublicKey` and
+      :class:`PaillierPrivateKey`
+    """
+    p = q = n = None
+    n_len = 0
+    while n_len != n_length:
+        p = getprimeover(n_length // 2)
+        q = p
+        while q == p:
+            q = getprimeover(n_length // 2)
+        n = p * q
+        n_len = n.bit_length()
+
+    # g in Z*n^2
+    #g = random.SystemRandom().randrange(1, n**2)
+    g = n + 1
+
+    mpk = PaillierPublicKey(n, g)
+    msk = PaillierPrivateKey(mpk, p, q)
+
+    r = generate_random_value(n, m)
+
+    public_key = [0] * m
+    private_key = [0] * m
+    for i in range(m):
+        public_key[i], private_key[i] = generate_key_pairs(n, g, p, q, r[i])
+
+    return mpk, msk, public_key, private_key
+
+
+def generate_key_pairs(n, g, p, q, ri):
+    public_key = PaillierPublicKey(n, g, ri)
+    private_key = PaillierPrivateKey(public_key, p, q)
+    return public_key, private_key
+
+
+def generate_random_value(old_n, m):
+    n_length = 512
+    p = q = n = None
+    n_len = 0
+    while n_len != n_length:
+        p = getprimeover(n_length // 2)
+        q = p
+        while q == p:
+            q = getprimeover(n_length // 2)
+        n = p * q
+        n_len = n.bit_length()
+
+    r = [0] * m
+    for i in range(m - 1):
+        r[i] = random.SystemRandom().randrange(1, n)
+
+    r[-1] = sum(r) * -1
+    return r
 
 
 def generate_paillier_keypair(private_keyring=None, n_length=DEFAULT_KEYSIZE):
@@ -83,11 +152,20 @@ class PaillierPublicKey(object):
         increased, if you are happy to redefine "safely" and lower the
         chance of detecting an integer overflow.
     """
-    def __init__(self, n):
-        self.g = n + 1
+
+    def __init__(self, n, g=None, ri=None):
+        self.g = g or n + 1
+        self.ri = ri or 1
         self.n = n
         self.nsquare = n * n
         self.max_int = n // 3 - 1
+
+        self.enc_ri = 0
+        self.enc_ri_neg = 0
+
+        if self.ri != 1:
+            self.enc_ri = self.encrypt(self.ri)
+            self.enc_ri_neg = self.encrypt(-self.ri)
 
     def __repr__(self):
         publicKeyHash = hex(hash(self))[2:]
@@ -141,6 +219,15 @@ class PaillierPublicKey(object):
         """Return a cryptographically random number less than :attr:`n`"""
         return random.SystemRandom().randrange(1, self.n)
 
+    def encryptMatrix(self, matrix):
+        if matrix.ndim == 1:
+            matrix_encoded = np.asarray([self.encrypt(matrix[i]) for i in range(matrix.shape[0])])
+            return matrix_encoded
+        else:
+            matrix_encoded = np.asarray(
+                [[self.encrypt(matrix[i][j]) for j in range(matrix.shape[1])] for i in range(matrix.shape[0])])
+            return matrix_encoded
+
     def encrypt(self, value, precision=None, r_value=None):
         """Encode and Paillier encrypt a real number *value*.
 
@@ -188,6 +275,10 @@ class PaillierPublicKey(object):
         obfuscator = r_value or 1
         ciphertext = self.raw_encrypt(encoding.encoding, r_value=obfuscator)
         encrypted_number = EncryptedNumber(self, ciphertext, encoding.exponent)
+
+        if (self.ri != 1) & (self.enc_ri != 0) & (self.enc_ri_neg != 0):
+            encrypted_number = encrypted_number.__add__(self.enc_ri)
+
         if r_value is None:
             encrypted_number.obfuscate()
         return encrypted_number
@@ -213,14 +304,15 @@ class PaillierPrivateKey(object):
       hp (int): h(p) - see Paillier's paper.
       hq (int): h(q) - see Paillier's paper.
     """
+
     def __init__(self, public_key, p, q):
-        if not p*q == public_key.n:
+        if not p * q == public_key.n:
             raise ValueError('given public key does not match the given p and q.')
         if p == q:
             # check that p and q are different, otherwise we can't compute p^-1 mod q
             raise ValueError('p and q have to be different')
         self.public_key = public_key
-        if q < p: #ensure that p < q.
+        if q < p:  # ensure that p < q.
             self.p = q
             self.q = p
         else:
@@ -256,13 +348,22 @@ class PaillierPrivateKey(object):
         p_minus_q = isqrt(p_plus_q * p_plus_q - public_key.n * 4)
         q = (p_plus_q - p_minus_q) // 2
         p = p_plus_q - q
-        if not p*q == public_key.n:
+        if not p * q == public_key.n:
             raise ValueError('given public key and totient do not match.')
         return PaillierPrivateKey(public_key, p, q)
 
     def __repr__(self):
         pub_repr = repr(self.public_key)
         return "<PaillierPrivateKey for {}>".format(pub_repr)
+
+    def decryptMatrix(self, matrix):
+        if matrix.ndim == 1:
+            matrix_decoded = np.asarray([self.decrypt(matrix[i]) for i in range(matrix.shape[0])])
+            return matrix_decoded
+        else:
+            matrix_decoded = np.asarray(
+                [[self.decrypt(matrix[i][j]) for j in range(matrix.shape[1])] for i in range(matrix.shape[0])])
+            return matrix_decoded
 
     def decrypt(self, encrypted_number):
         """Return the decrypted & decoded plaintext of *encrypted_number*.
@@ -320,9 +421,12 @@ class PaillierPrivateKey(object):
         if Encoding is None:
             Encoding = EncodedNumber
 
+        if (self.public_key.ri != 1) & (self.public_key.enc_ri != 0) & (self.public_key.enc_ri_neg != 0):
+            encrypted_number = encrypted_number.__add__(self.public_key.enc_ri_neg)
+
         encoded = self.raw_decrypt(encrypted_number.ciphertext(be_secure=False))
         return Encoding(self.public_key, encoded,
-                             encrypted_number.exponent)
+                        encrypted_number.exponent)
 
     def raw_decrypt(self, ciphertext):
         """Decrypt raw ciphertext and return raw plaintext.
@@ -340,17 +444,17 @@ class PaillierPrivateKey(object):
         """
         if not isinstance(ciphertext, int):
             raise TypeError('Expected ciphertext to be an int, not: %s' %
-                type(ciphertext))
+                            type(ciphertext))
 
-        decrypt_to_p = self.l_function(powmod(ciphertext, self.p-1, self.psquare), self.p) * self.hp % self.p
-        decrypt_to_q = self.l_function(powmod(ciphertext, self.q-1, self.qsquare), self.q) * self.hq % self.q
+        decrypt_to_p = self.l_function(powmod(ciphertext, self.p - 1, self.psquare), self.p) * self.hp % self.p
+        decrypt_to_q = self.l_function(powmod(ciphertext, self.q - 1, self.qsquare), self.q) * self.hq % self.q
         return self.crt(decrypt_to_p, decrypt_to_q)
 
     def h_function(self, x, xsquare):
         """Computes the h-function as defined in Paillier's paper page 12,
         'Decryption using Chinese-remaindering'.
         """
-        return invert(self.l_function(powmod(self.public_key.g, x - 1, xsquare),x), x)
+        return invert(self.l_function(powmod(self.public_key.g, x - 1, xsquare), x), x)
 
     def l_function(self, x, p):
         """Computes the L function as defined in Paillier's paper. That is: L(x,p) = (x-1)/p"""
@@ -383,6 +487,7 @@ class PaillierPrivateKeyring(Mapping):
       private_keys (list of PaillierPrivateKey): an optional starting
         list of :class:`PaillierPrivateKey` instances.
     """
+
     def __init__(self, private_keys=None):
         if private_keys is None:
             private_keys = []
@@ -470,6 +575,7 @@ class EncryptedNumber(object):
       TypeError: if *ciphertext* is not an int, or if *public_key* is
         not a :class:`PaillierPublicKey`.
     """
+
     def __init__(self, public_key, ciphertext, exponent=0):
         self.public_key = public_key
         self.__ciphertext = ciphertext
@@ -479,6 +585,19 @@ class EncryptedNumber(object):
             raise TypeError('ciphertext should be an integer')
         if not isinstance(self.public_key, PaillierPublicKey):
             raise TypeError('public_key should be a PaillierPublicKey')
+
+    def serialize(self):
+        return {'ciphertext': str(self.__ciphertext),
+                'exponent': str(self.exponent),
+                'is_obfuscated': self.__is_obfuscated}
+
+    @staticmethod
+    def deserialize(obj_ser):
+        encrypted_number = EncryptedNumber(PaillierPublicKey(2048), int(obj_ser['ciphertext']), int(obj_ser['exponent']))
+        if obj_ser['is_obfuscated'] == 'True':
+            encrypted_number.obfuscate()
+
+        return encrypted_number
 
     def __add__(self, other):
         """Add an int, float, `EncryptedNumber` or `EncodedNumber`."""
@@ -504,6 +623,29 @@ class EncryptedNumber(object):
             encoding = other
         else:
             encoding = EncodedNumber.encode(self.public_key, other)
+        product = self._raw_mul(encoding.encoding)
+        exponent = self.exponent + encoding.exponent
+
+        return EncryptedNumber(self.public_key, product, exponent)
+
+    def mul_enc(self, other):
+        """Multiply by an int, float, or EncodedNumber."""
+        if isinstance(other, EncryptedNumber):
+            raise NotImplementedError('Good luck with that...')
+
+        if isinstance(other, EncodedNumber):
+            encoding = other
+        else:
+            encoding = EncodedNumber.encode(self.public_key, other)
+
+        if (self.public_key.ri != 1) & (self.public_key.enc_ri != 0) & (self.public_key.enc_ri_neg != 0):
+            enc_msg = self.__add__(self.public_key.enc_ri_neg)
+            product = enc_msg._raw_mul(encoding.encoding)
+            exponent = enc_msg.exponent + encoding.exponent
+            sum_enc = EncryptedNumber(enc_msg.public_key, product, exponent).__add__(self.public_key.enc_ri)
+            sum_enc.obfuscate()
+            return sum_enc
+
         product = self._raw_mul(encoding.encoding)
         exponent = self.exponent + encoding.exponent
 
@@ -730,7 +872,7 @@ class EncryptedNumber(object):
         """
         if not isinstance(plaintext, int):
             raise TypeError('Expected ciphertext to be int, not %s' %
-                type(plaintext))
+                            type(plaintext))
 
         if plaintext < 0 or plaintext >= self.public_key.n:
             raise ValueError('Scalar out of bounds: %i' % plaintext)
@@ -742,4 +884,3 @@ class EncryptedNumber(object):
             return powmod(neg_c, neg_scalar, self.public_key.nsquare)
         else:
             return powmod(self.ciphertext(False), plaintext, self.public_key.nsquare)
-

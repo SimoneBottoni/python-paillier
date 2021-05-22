@@ -18,6 +18,7 @@ from phe.paillier import PaillierPrivateKey, PaillierPublicKey
 #
 # You should have received a copy of the GNU General Public License
 # along with pyphe.  If not, see <http://www.gnu.org/licenses/>.
+from phe.util import getprimeover
 
 """Unittest for paillier module."""
 
@@ -25,11 +26,77 @@ import logging
 import unittest
 import sys
 import math
+import random
+from functools import reduce
 
 from phe import paillier
+from phe import util
 
+DEFAULT_KEYSIZE = 2048
 
 class PaillierGeneric(unittest.TestCase):
+
+    def test_cPDS_can_decrypt_after_sum(self):
+        for i in range(1, 100):
+            m = 2
+            mpk, sk, public_key_list, private_key_list = paillier.generate_cPDS_keypair(m)
+
+            '''a = public_key_list[0].encrypt(15.8)
+            a = a.mul_scalar(0.2)
+            dec_a = private_key_list[0].decrypt(a)
+            d = public_key_list[1].encrypt(15.2)
+            d = d.mul_scalar(99.6)
+            dec_d = private_key_list[1].decrypt(d)
+            sum = a + d
+            c_ad = sk.decrypt(sum)'''
+
+            # Generate random msgs
+            msgs = [random.uniform(0.1, 99.9) for i in range(m)]
+            count = sum(msgs)
+            # Encrypt msgs[i] with pk[i]
+            cs = [public_key_list[i].encrypt(msgs[i]) for i in range(m)]
+
+            #r = random.uniform(0.1, 99)
+            r = 0
+            cs[0] = cs[0].mul_enc(r)
+            m0 = private_key_list[0].decrypt(cs[0])
+            self.assertEqual(m0, msgs[0] * r)
+
+            count = count - msgs[0] + msgs[0] * r
+
+            tot = sum(cs)
+            c = sk.decrypt(tot)
+            self.assertEqual(round(count, 10), round(c, 10))
+            print(round(count, 10), ' - ', round(c, 10))
+
+    def test_cPDS_cant_decrypt_without_sum(self):
+        for i in range(1, 100):
+            m = 30
+            mpk, sk, public_key_list, private_key_list = paillier.generate_cPDS_keypair(m)
+
+            # Generate random msgs
+            msgs = [random.uniform(0.1, 99.9) for i in range(m)]
+            # Encrypt msgs[i] with pk[i]
+            cs = [public_key_list[i].encrypt(msgs[i]) for i in range(m)]
+
+            t = 0
+            c = sk.decrypt(cs[t])
+            self.assertNotEqual(round(msgs[t], 10), round(c, 10))
+            print(msgs[t], ' - ', c)
+
+    def testcPDSRandomNumberGenerator(self, n_length=DEFAULT_KEYSIZE):
+        p = q = n = None
+        n_len = 0
+        while n_len != n_length:
+            p = getprimeover(n_length // 2)
+            q = p
+            while q == p:
+                q = getprimeover(n_length // 2)
+            n = p * q
+            n_len = n.bit_length()
+
+        r = paillier.generate_random_value(n, 4)
+        self.assertEqual(sum(r), 0)
 
     def testDefaultCreateKeypair(self):
         public_key, private_key = paillier.generate_paillier_keypair()

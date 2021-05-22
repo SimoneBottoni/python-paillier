@@ -191,6 +191,7 @@ class EncodedNumber(object):
         int_rep = round(fractions.Fraction(scalar)
                         * fractions.Fraction(cls.BASE) ** -exponent)
 
+        #if public_key.ri == 1:
         if abs(int_rep) > public_key.max_int:
             raise ValueError('Integer needs to be within +/- %d but got %d'
                              % (public_key.max_int, int_rep))
